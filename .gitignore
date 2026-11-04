@@ -55,3 +55,7 @@ ui_*.h
 
 # Vagrant stuff
 .vagrant
+
+.pio/
+components/arduino/
+external/btstack/
