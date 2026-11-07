@@ -87,8 +87,10 @@ ControllerPtr myControllers[BP32_MAX_GAMEPADS];
   unsigned long lastUpdateMicros = 0;
 
   unsigned long loopCount = 0;
+  unsigned long IMUCount = 0;
   unsigned long lastHzTime = 0;
   float loopHz = 0;
+  float IMUHz = 0;
 
 // ************************************* IMU ***************************************************
   // Időzítő változók az IMU mintavételezéshez
@@ -100,7 +102,7 @@ ControllerPtr myControllers[BP32_MAX_GAMEPADS];
   } imu;
 
   unsigned long lastBMItime = 0;
-  const unsigned long BMI_INTERVAL = 5; // 5 ezredmásodpercenkénti lekérdezés (200 Hz)
+  const unsigned long BMI_INTERVAL = 1; // 1 ezredmásodpercenkénti lekérdezés (1000 Hz)
 
   unsigned long lastPrintTime = 0;
   const unsigned long PRINT_INTERVAL = 200; // 200 ms-onkénti kiírás a monitorra (5 Hz)
@@ -119,11 +121,11 @@ ControllerPtr myControllers[BP32_MAX_GAMEPADS];
   bool steeringDirection = 0;        //Servo irány
   bool lastSteeringDirection = 0;    //irányváltás segéd változó
 
-  int MinsteeringValue = -1000;      //kormányzás maximum érték
-  int MaxsteeringValue = 1000;
+  int MinsteeringValue = -10;      //kormányzás maximum érték
+  int MaxsteeringValue = 10;
 
-  int MinthrottleValue = -1500;      //gáz maximum érték  /100
-  int MaxthrottleValue = 1500;
+  int MinthrottleValue = -10;      //gáz maximum érték  /100
+  int MaxthrottleValue = 10;
 
   float throttle;
   float steering;
@@ -406,7 +408,9 @@ bool updatePitchIMU() {
   
     // 5. KOMPLEMENTER SZŰRŐ (Szenzorfúzió)
     // Integráljuk a giroszkópot, és finoman hozzáigazítjuk a gyorsulásmérő abszolút szögét
-    float pitch_new = 0.98 * (pitch + gyroY_rad * dt) + 0.02 * accel_pitch;    //0.02
+    float pitch_new = 0.998f * (pitch + gyroY_rad * dt) + 0.002f * accel_pitch;  
+
+    //Ha a robot így túl lassan reagálna a statikus dőlésre, megpróbálhatod a 0.995f és 0.005f arányt is.
     
     pitch = pitch_new;
     
@@ -434,11 +438,11 @@ bool updatePitchIMU() {
 
 void convertInValue(){
 
-  //Servo vezérlés, irány meghatározás
+  //KORMÁNY vezérlés, irány meghatározás
   int steeringValue;
   if(steeringDirection) steeringValue = map(LeftX, -512, 512, MinsteeringValue, MaxsteeringValue);
   else steeringValue = map(LeftX, -512, 512, MaxsteeringValue, MinsteeringValue);
-  steering = float(steeringValue)*0.001;
+  steering = float(steeringValue)*0.01;
   //Serial.print("steering"); Serial.print(steering); 
 
   /*
@@ -459,7 +463,7 @@ void convertInValue(){
   int throttleValue;
   if(motorDirection) throttleValue = map(RightY, -512, 512, MinthrottleValue, MaxthrottleValue);
   else throttleValue = map(RightY, -512, 512, MaxthrottleValue, MinthrottleValue);
-  throttle = float(throttleValue)*0.01;
+  throttle = float(throttleValue);
   //Serial.print(" throttle"); Serial.println(throttle); 
   
 }
@@ -542,7 +546,7 @@ void processButtons(){
   BLDCDriver3PWM driver1 = BLDCDriver3PWM(M1_in1, M1_in2, M1_in3, M1_en);
   BLDCDriver3PWM driver2 = BLDCDriver3PWM(M2_in1, M2_in2, M2_in3, M2_en);
 
-  float U_supply = 8;          // tápfesz 
+  float U_supply = 12;          // tápfesz 
   float U_limit = 8;       // motor feszlimit
   float I_limit = 1;     // motor áramlimit
 //
@@ -550,11 +554,11 @@ void processButtons(){
   
   // 1. SEBESSÉG PID: A kerekek sebességét finoman igazítja a kívánt gázhoz (throttle)
   // P=0.5 jó indulásnak, de az I tagot picit emelhetjük, a limit legyen magasabb!
-  PIDController PID_speed{0.01, 0.0, 0.0, 100, 0.2};        // S
+  PIDController PID_speed{0.015, 0.03, 0.0, 100, 0.1};        // S
 
   // 2. EGYENSÚLYOZÓ PID (A robot magja): A dőlési szögből (pitch) számol keréksebességet.
   // Mivel a motor közvetlen hajtású, a P tagot fel kell vinni, a limitet pedig 15-20 rad/s-ra emelni!
-  PIDController PID_balance{1, 0.0, 0.0, 100000, 1.0};     // B
+  PIDController PID_balance{1.5, 0.0, 0.08, 100000, 1.0};     // B
 
   // 3. MOTOR PID-ek: Mivel a SimpleFOC VELOCITY módban belsőleg már szabályozza a sebességet,
   // a kódodban lévő külső PID-et Transzparensre (Átengedőre) kell állítani, hogy ne akadjon össze!
@@ -562,7 +566,7 @@ void processButtons(){
   PIDController PID_motor2{1.0, 0.0, 0.0, 10000, 1.0}; 
 
   // 4. LOW-PASS SZŰRŐK: A Tf értékeket milliszekundumos tartományba kell hozni!
-  LowPassFilter lpf_speed{0.05};    // 5 ms-os szűrés a sebességre          Vf..
+  LowPassFilter lpf_speed{0.1};    // 5 ms-os szűrés a sebességre          Vf..
 
   LowPassFilter lpf_motor1{0.02};   // 20 ms-os szűrés a keréksebességre
   LowPassFilter lpf_motor2{0.02};   // 20 ms-os szűrés a keréksebességre
@@ -808,8 +812,6 @@ void loop() {
     bool dataUpdated = BP32.update();   //A bluetoth adatok frissítése
     processControllers();               //A controller függvényei 
     
-    motor1.move();
-    motor2.move();
 
     if(connected){                      // Ha csatlakoztatva van a controller....
       convertInValue();
@@ -844,7 +846,7 @@ void loop() {
       float current_robot_speed = lpf_speed((motor1_velocity + motor2_velocity) / 2.0); //*-1 hogy az előjel megfelelő
       
       // Cél dőlésszög (A joystick throttle és a kerekek jelenlegi sebességének különbsége (rad)
-      setpoint_angle = PID_speed(current_robot_speed - lpf_throttle(throttle));  
+      setpoint_angle = PID_speed(current_robot_speed - lpf_throttle(throttle)); // A joystick throttle és a kerekek jelenlegi sebességének különbsége (rad)
 
       //balance out Amperben
       balanceOut = PID_balance(setpoint_angle - pitch);
@@ -882,10 +884,14 @@ void loop() {
       motor1.target = balanceOut - total_steering; 
       motor2.target = balanceOut + total_steering;
       */
-
+    motor1.move();
+    motor2.move();
+    IMUCount++;
     }else{
       motor1.target = 0;
       motor2.target = 0;
+      motor1.move();
+      motor2.move();
       PID_speed.reset();
       PID_balance.reset();
     }
@@ -894,13 +900,16 @@ void loop() {
   // --- LOOP FREKVENCIA SZÁMÍTÁSA (Minden 1 másodpercben) ---
   if (tNowMs - lastHzTime >= 1000) {
     loopHz = loopCount; // Mivel 1000ms telt el, a loopCount pontosan a Hz-et jelenti
+    IMUHz = IMUCount; // Az IMU frissítések száma 1 másodperc alatt
     loopCount = 0;
+    IMUCount = 0;
     lastHzTime = tNowMs;
   }
   
   //Serial Monitor
   if (tNowMs-tLastMs > 300){
-    //Serial.print("  Loop FOC sebesség: "); Serial.print(loopHz); Serial.print(" Hz");
+    //Serial.print("  Loop FOC sebesség: "); Serial.print(loopHz); Serial.print(" Hz ");
+    //Serial.print("  IMU frissítések: "); Serial.print(IMUHz); Serial.print(" Hz ");
     //Serial.print("Vel1: ");Serial.print(motor1.shaft_velocity);
     //Serial.print("  Vel2: ");Serial.print(motor2.shaft_velocity);
     //Serial.print("  setpoint_angle: ");Serial.print(setpoint_angle);
