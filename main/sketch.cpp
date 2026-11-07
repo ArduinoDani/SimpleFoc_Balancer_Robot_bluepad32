@@ -62,7 +62,7 @@ ControllerPtr myControllers[BP32_MAX_GAMEPADS];
 
 // ************************************ SERVO ***********************************************
   
-  Servo Servo;
+  Servo servo;
 
   //bool servoDirection = 0;        //Servo irány
   //bool lastServoDirection = 0;    //irányváltás segéd változó
@@ -107,7 +107,7 @@ ControllerPtr myControllers[BP32_MAX_GAMEPADS];
 
 
   // Segédfüggvény az előjel meghatározásához
-  #define _sign(val) ((val > 0) - (val < 0))
+  //#define _sign(val) ((val > 0) - (val < 0))
 
 
 //
@@ -394,7 +394,7 @@ bool updatePitchIMU() {
     // 3. Giroszkóp dőlési sebességének átváltása radián/másodpercbe
     // Gyroszkóp Y tengely (pitch). 131.07-tel osztunk fok/mp-ért.
     // Ha ±250°/s-ra konfiguráltad, akkor használd a 131.07-et!
-    float gyroY_rad = (float)imu.gy / 131.07;
+    float gyroY_rad = ((float)imu.gy / 131.07) * (PI / 180.0);
   
     // 4. Gyorsulásmérő adatok skálázása (+/-2g tartománynál az osztó 16384.0)
     float ax = (float)imu.ax/ 16384.0;
@@ -402,7 +402,7 @@ bool updatePitchIMU() {
   
     // Szög kiszámítása tisztán a gyorsulásmérőből (radiánban)
     // Az X és Z tengelyek határozzák meg a pitch szöget a függőlegeshez képest
-    float accel_pitch = atan2(-ax, az)* (180.0 / PI); 
+    float accel_pitch = atan2(-ax, az);
   
     // 5. KOMPLEMENTER SZŰRŐ (Szenzorfúzió)
     // Integráljuk a giroszkópot, és finoman hozzáigazítjuk a gyorsulásmérő abszolút szögét
@@ -413,7 +413,7 @@ bool updatePitchIMU() {
 
     
   
-    if(abs(pitch) > 70){
+    if(abs(pitch) > 0.70){
       falling = true;
       stands_again = false;
     }
@@ -440,12 +440,26 @@ void convertInValue(){
   else steeringValue = map(LeftX, -512, 512, MaxsteeringValue, MinsteeringValue);
   steering = float(steeringValue)*0.001;
   //Serial.print("steering"); Serial.print(steering); 
+
+  /*
+  // 1. Joystick bemenet tisztítása (Holtjáték / Deadband kezelés)
+  float raw_steering = steering_joystick_input; // A távirányítóról jövő nyers érték
+  float deadband = 0.08; // 8%-os holtjáték, ezt szükség szerint finomíthatod
+
+  if (abs(raw_steering) < deadband) {
+      steering = 0.0; // Ha a holtjátékon belül van, garantáltan tiszta nulla
+  } else {
+      // Opcionális finomítás: skálázzuk újra a maradék tartományt, 
+      // hogy a kormányzás finoman, nulláról induljon a holtjáték határától
+      steering = _sign(raw_steering) * (abs(raw_steering) - deadband) / (1.0 - deadband);
+}
+  */
   
   //Gáz, fék, hátramenet vezérlés
   int throttleValue;
   if(motorDirection) throttleValue = map(RightY, -512, 512, MinthrottleValue, MaxthrottleValue);
   else throttleValue = map(RightY, -512, 512, MaxthrottleValue, MinthrottleValue);
-  throttle = float(throttleValue)*0.001;
+  throttle = float(throttleValue)*0.01;
   //Serial.print(" throttle"); Serial.println(throttle); 
   
 }
@@ -532,15 +546,15 @@ void processButtons(){
   float U_limit = 8;       // motor feszlimit
   float I_limit = 1;     // motor áramlimit
 //
-//  **************************************** PID & LPF ******************************************
+  //  **************************************** PID & LPF ******************************************
   
   // 1. SEBESSÉG PID: A kerekek sebességét finoman igazítja a kívánt gázhoz (throttle)
   // P=0.5 jó indulásnak, de az I tagot picit emelhetjük, a limit legyen magasabb!
-  PIDController PID_speed{0.5, 0.0, 0.0, 100, 0.01}; 
+  PIDController PID_speed{0.01, 0.0, 0.0, 100, 0.2};        // S
 
   // 2. EGYENSÚLYOZÓ PID (A robot magja): A dőlési szögből (pitch) számol keréksebességet.
   // Mivel a motor közvetlen hajtású, a P tagot fel kell vinni, a limitet pedig 15-20 rad/s-ra emelni!
-  PIDController PID_balance{1.0, 0.0, 0.01, 100000, 1.0}; // .limit = fok-> volt
+  PIDController PID_balance{1, 0.0, 0.0, 100000, 1.0};     // B
 
   // 3. MOTOR PID-ek: Mivel a SimpleFOC VELOCITY módban belsőleg már szabályozza a sebességet,
   // a kódodban lévő külső PID-et Transzparensre (Átengedőre) kell állítani, hogy ne akadjon össze!
@@ -548,14 +562,14 @@ void processButtons(){
   PIDController PID_motor2{1.0, 0.0, 0.0, 10000, 1.0}; 
 
   // 4. LOW-PASS SZŰRŐK: A Tf értékeket milliszekundumos tartományba kell hozni!
-  LowPassFilter lpf_pitch{0.05};    // 5 ms-os szűrés a dőlésszögre (nagyon gyors!)
+  LowPassFilter lpf_speed{0.05};    // 5 ms-os szűrés a sebességre          Vf..
 
   LowPassFilter lpf_motor1{0.02};   // 20 ms-os szűrés a keréksebességre
   LowPassFilter lpf_motor2{0.02};   // 20 ms-os szűrés a keréksebességre
 
   // A távirányító bemenetek (joystick) maradhatnak lassabbak a sima vezetéshez
-  LowPassFilter lpf_throttle{0.02};   // 20 ms-os simítás a gázra
-  LowPassFilter lpf_steering{0.02};   // 20 ms-os simítás a kormányzásra
+  LowPassFilter lpf_throttle{0.02};   // 20 ms-os simítás a gázra           Tf
+  LowPassFilter lpf_steering{0.02};   // 20 ms-os simítás a kormányzásra    Sf
 
   //
 //  *************************************** COMMANDER *****************************************
@@ -569,7 +583,7 @@ void processButtons(){
   void pidMotor1(char* cmd) {  command.pid(&PID_motor1, cmd);}
   void pidMotor2(char* cmd) {  command.pid(&PID_motor2, cmd);}
 
-  void lpfPitch(char* cmd) {  command.lpf(&lpf_pitch, cmd);}
+  void lpfSpeed(char* cmd) {  command.lpf(&lpf_speed, cmd);}
   void lpfSteering(char* cmd) {  command.lpf(&lpf_steering, cmd);}
   void lpfThrottle(char* cmd) {  command.lpf(&lpf_throttle, cmd);}
 
@@ -660,10 +674,10 @@ void setup() {
 // SERVO------------------------------------------------------------------------------------------------------------------------------
   // Allow allocation of all timers
   ESP32PWM::allocateTimer(3);
-  Servo.setPeriodHertz(50);    // standard 50 hz servo
-  Servo.attach(SERVO1_PIN, MinServoValue, MaxServoValue); //
+  servo.setPeriodHertz(50);    // standard 50 hz servo
+  servo.attach(SERVO1_PIN, MinServoValue, MaxServoValue); //
   
-  Servo.writeMicroseconds(ServoPos);
+  servo.writeMicroseconds(ServoPos);
   delay(500);
 
 //
@@ -674,7 +688,7 @@ void setup() {
   // Setup the Bluepad32 callbacks
   BP32.setup(&onConnectedController, &onDisconnectedController);
   delay(300);
-//
+
 // MOTOR / SENSOR
   SimpleFOCDebug::enable(&Serial);
 
@@ -749,7 +763,7 @@ void setup() {
   command.add('A', lpfMotor1, "lpf_motor1");
   command.add('C', lpfMotor2, "lpf_motor2");
 
-  command.add('P', lpfPitch, "lpf pitch");    // VF0.07
+  command.add('V', lpfSpeed, "lpf speed");    // VF0.07
   command.add('T', lpfThrottle, "lpf throttle");
   command.add('I', lpfSteering, "lpf steering");
 
@@ -804,7 +818,7 @@ void loop() {
       
       if(ServoPos != LastServoPos){
         LastServoPos = ServoPos;
-        Servo.writeMicroseconds(ServoPos);
+        servo.writeMicroseconds(ServoPos);
       }
     }
     else failSafe();
@@ -822,28 +836,58 @@ void loop() {
     if(falling == false && startBalancing == true){
       if(ServoPos == ParkingPos) ServoPos = RunningPos;  // ha indult a robot, a kitámasztót behúzza
 
-      motor1_velocity = motor1.shaft_velocity;  //lpf_motor1(motor1.shaft_velocity);
+      motor1_velocity = motor1.shaft_velocity;  //lpf_motor1(motor1.shaft_velocity); 
       motor2_velocity = motor2.shaft_velocity;  //lpf_motor2(motor2.shaft_velocity);
       //cél dőlésszőg meghatározása, a keréksebbesség és akívánt sebesség alapján    tartomány:~ -80 / 80
-      // A két motor átlagsebessége szűrve
-      float current_robot_speed = lpf_pitch((motor1_velocity + motor2_velocity) / 2.0); //*-1 hogy az előjel megfelelő
-      
-      // Cél dőlésszög (A joystick throttle és a kerekek jelenlegi sebességének különbsége)
-      setpoint_angle = PID_speed(lpf_throttle(throttle) - current_robot_speed);  
 
+      // A két motor átlagsebessége szűrve (rad/s)
+      float current_robot_speed = lpf_speed((motor1_velocity + motor2_velocity) / 2.0); //*-1 hogy az előjel megfelelő
+      
+      // Cél dőlésszög (A joystick throttle és a kerekek jelenlegi sebességének különbsége (rad)
+      setpoint_angle = PID_speed(current_robot_speed - lpf_throttle(throttle));  
+
+      //balance out Amperben
       balanceOut = PID_balance(setpoint_angle - pitch);
 
+      //Amperben, mint a balance limit kb. 20-30%-a (pl. max 0.2 - 0.3 Amper),
       float filteredSteering = lpf_steering(steering);
 
       motor1Speed = balanceOut - filteredSteering; 
       motor2Speed = balanceOut + filteredSteering; 
 
-      motor1.target = PID_motor1(motor1Speed);// 
-      motor2.target = PID_motor2(motor2Speed);// 
+      motor1.target = motor1Speed;// 
+      motor2.target = motor2Speed;// 
+
+      /*
+      // 2. EGYENESVONAL TARTÁS (Yaw Compensation)
+      float yaw_error = 0.0;
+      if (steering == 0.0) {  
+        // Ha a pilóta nem kormányoz, a két kerék sebességének meg kell egyeznie.
+        // Ha a motor1 gyorsabb, a különbség pozitív -> a PID-nek csökkentenie kell a motor1 nyomatékát.
+        yaw_error = motor1_velocity - motor2_velocity;
+      } else {
+        // Ha szándékosan kanyarodunk, kikapcsoljuk az egyenesen tartást
+        yaw_error = 0.0; 
+        PID_yaw.reset();  // Reseteljük a PID integrátorát, hogy ne halmozódjon fel a hiba
+      }
+
+      // A yaw PID kiszámolja a korrekciós áramot (Amperben)
+      float yaw_correction = PID_yaw(yaw_error);
+
+      // 3. Kormányzás és korrekció összevonása
+      // Ha nem kormányzol, a filteredSteering 0, és a yaw_correction tartja egyenesen.
+      float total_steering = lpf_steering(steering) + yaw_correction;
+
+      // 4. Végső motoráramok (SimpleFOC target)
+      motor1.target = balanceOut - total_steering; 
+      motor2.target = balanceOut + total_steering;
+      */
 
     }else{
       motor1.target = 0;
       motor2.target = 0;
+      PID_speed.reset();
+      PID_balance.reset();
     }
   }
     
