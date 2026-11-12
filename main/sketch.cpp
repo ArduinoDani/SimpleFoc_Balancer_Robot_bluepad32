@@ -121,11 +121,11 @@ ControllerPtr myControllers[BP32_MAX_GAMEPADS];
   bool steeringDirection = 0;        //Servo irány
   bool lastSteeringDirection = 0;    //irányváltás segéd változó
 
-  int MinsteeringValue = -10;      //kormányzás maximum érték
-  int MaxsteeringValue = 10;
+  int MinsteeringValue = -20;      //kormányzás maximum érték
+  int MaxsteeringValue = 20;
 
-  int MinthrottleValue = -10;      //gáz maximum érték  /100
-  int MaxthrottleValue = 10;
+  int MinthrottleValue = -20;      //gáz maximum érték  /100
+  int MaxthrottleValue = 20;
 
   float throttle;
   float steering;
@@ -438,33 +438,36 @@ bool updatePitchIMU() {
 
 void convertInValue(){
 
-  //KORMÁNY vezérlés, irány meghatározás
-  int steeringValue;
-  if(steeringDirection) steeringValue = map(LeftX, -512, 512, MinsteeringValue, MaxsteeringValue);
-  else steeringValue = map(LeftX, -512, 512, MaxsteeringValue, MinsteeringValue);
-  steering = float(steeringValue)*0.01;
-  //Serial.print("steering"); Serial.print(steering); 
-
-  /*
-  // 1. Joystick bemenet tisztítása (Holtjáték / Deadband kezelés)
-  float raw_steering = steering_joystick_input; // A távirányítóról jövő nyers érték
-  float deadband = 0.08; // 8%-os holtjáték, ezt szükség szerint finomíthatod
-
-  if (abs(raw_steering) < deadband) {
-      steering = 0.0; // Ha a holtjátékon belül van, garantáltan tiszta nulla
-  } else {
-      // Opcionális finomítás: skálázzuk újra a maradék tartományt, 
-      // hogy a kormányzás finoman, nulláról induljon a holtjáték határától
-      steering = _sign(raw_steering) * (abs(raw_steering) - deadband) / (1.0 - deadband);
-}
-  */
   
-  //Gáz, fék, hátramenet vezérlés
-  int throttleValue;
-  if(motorDirection) throttleValue = map(RightY, -512, 512, MinthrottleValue, MaxthrottleValue);
-  else throttleValue = map(RightY, -512, 512, MaxthrottleValue, MinthrottleValue);
-  throttle = float(throttleValue);
-  //Serial.print(" throttle"); Serial.println(throttle); 
+  // --- KORMÁNY VEZÉRLÉS (Float alapú, holtjátékkal) ---
+  // A LeftX nyers értéke -512 és 512 között van. Normalizáljuk -1.0 és +1.0 közé:
+  float raw_steering = (float)LeftX / 512.0f;
+  if (!steeringDirection) raw_steering = -raw_steering; // Irány megfordítása, ha kell
+
+  // 8%-os holtjáték, hogy középen stabil legyen
+  if (abs(raw_steering) < 0.08f) {
+      steering = 0.0f;
+  } else {
+      // Skálázás és finom indítás a holtjáték szélétől (max 0.2A kormányáram)
+      float scaled_steering = _sign(raw_steering) * (abs(raw_steering) - 0.08f) / (1.0f - 0.08f);
+      steering = scaled_steering * 0.15f; 
+  }
+  
+  
+  
+  // --- GÁZ ÉS IRÁNYVÁLTÁS VEZÉRLÉS (Sima, lépcsőzetes ugrások nélkül) ---
+  // A RightY nyers értéke -512 és 512 között van. Normalizáljuk -1.0 és +1.0 közé:
+  float raw_throttle = (float)RightY / 512.0f;
+  if (!motorDirection) raw_throttle = -raw_throttle; // Irány megfordítása, ha kell
+
+  if (abs(raw_throttle) < 0.08f) {
+      throttle = 0.0f;
+  } else {
+      // Skálázás rad/s-ra (A te -20 és 20 közötti tartományod tiszta floatként)
+      float scaled_throttle = _sign(raw_throttle) * (abs(raw_throttle) - 0.08f) / (1.0f - 0.08f);
+      throttle = scaled_throttle * 20.0f; 
+  }
+  
   
 }
 
@@ -554,26 +557,24 @@ void processButtons(){
   
   // 1. SEBESSÉG PID: A kerekek sebességét finoman igazítja a kívánt gázhoz (throttle)
   // P=0.5 jó indulásnak, de az I tagot picit emelhetjük, a limit legyen magasabb!
-  PIDController PID_speed{0.015, 0.03, 0.0, 100, 0.1};        // S
+  PIDController PID_speed{0.01, 0.01, 0.0, 10000, 0.1};        // S
 
   // 2. EGYENSÚLYOZÓ PID (A robot magja): A dőlési szögből (pitch) számol keréksebességet.
   // Mivel a motor közvetlen hajtású, a P tagot fel kell vinni, a limitet pedig 15-20 rad/s-ra emelni!
-  PIDController PID_balance{1.5, 0.0, 0.08, 100000, 1.0};     // B
+  PIDController PID_balance{1.5, 2.0, 0.15, 100000, 1.2};     // B
 
   // 3. MOTOR PID-ek: Mivel a SimpleFOC VELOCITY módban belsőleg már szabályozza a sebességet,
   // a kódodban lévő külső PID-et Transzparensre (Átengedőre) kell állítani, hogy ne akadjon össze!
-  PIDController PID_motor1{1.0, 0.0, 0.0, 10000, 1.0}; 
-  PIDController PID_motor2{1.0, 0.0, 0.0, 10000, 1.0}; 
+  PIDController PID_yaw{0.1, 0.05, 0.0, 100, 0.1}; 
 
   // 4. LOW-PASS SZŰRŐK: A Tf értékeket milliszekundumos tartományba kell hozni!
-  LowPassFilter lpf_speed{0.1};    // 5 ms-os szűrés a sebességre          Vf..
+  LowPassFilter lpf_speed{0.1};    // 100 ms-os szűrés a sebességre          Vf..
 
-  LowPassFilter lpf_motor1{0.02};   // 20 ms-os szűrés a keréksebességre
-  LowPassFilter lpf_motor2{0.02};   // 20 ms-os szűrés a keréksebességre
-
+  LowPassFilter lpf_Yaw{0.1};   // 100 ms-os szűrés a keréksebességre
+  
   // A távirányító bemenetek (joystick) maradhatnak lassabbak a sima vezetéshez
-  LowPassFilter lpf_throttle{0.02};   // 20 ms-os simítás a gázra           Tf
-  LowPassFilter lpf_steering{0.02};   // 20 ms-os simítás a kormányzásra    Sf
+  LowPassFilter lpf_throttle{0.2};   // 20 ms-os simítás a gázra           Tf
+  LowPassFilter lpf_steering{0.2};   // 20 ms-os simítás a kormányzásra    Sf
 
   //
 //  *************************************** COMMANDER *****************************************
@@ -584,19 +585,14 @@ void processButtons(){
   void pidBal(char* cmd) {  command.pid(&PID_balance, cmd);}
   void pidSpd(char* cmd) {  command.pid(&PID_speed, cmd);}
 
-  void pidMotor1(char* cmd) {  command.pid(&PID_motor1, cmd);}
-  void pidMotor2(char* cmd) {  command.pid(&PID_motor2, cmd);}
+  void pidyaw(char* cmd) {  command.pid(&PID_yaw, cmd);}
 
   void lpfSpeed(char* cmd) {  command.lpf(&lpf_speed, cmd);}
   void lpfSteering(char* cmd) {  command.lpf(&lpf_steering, cmd);}
   void lpfThrottle(char* cmd) {  command.lpf(&lpf_throttle, cmd);}
 
-
-  void lpfMotor1(char* cmd) {  command.lpf(&lpf_motor1, cmd);}
-  void lpfMotor2(char* cmd) {  command.lpf(&lpf_motor2, cmd);}
-
-  //void angleOffs(char* cmd) {angleOffset = atof(cmd);}
-  //void gyroFilter(char* cmd) {gyroFilterConstant = atof(cmd);}
+  void lpfYaw(char* cmd) {  command.lpf(&lpf_Yaw, cmd);}
+  
 
 //...
 //  ******************************************* SETUP *****************************************
@@ -761,18 +757,14 @@ void setup() {
   command.add('B', pidBal, "PID_balance");    // BP0.5, BI0.001, ...
   command.add('S', pidSpd, "PID_speed");
 
-  command.add('L', pidMotor1, "PID_motor1");
-  command.add('R', pidMotor2, "PID_motor2");
+  command.add('Y', pidyaw, "PID_yaw");
 
-  command.add('A', lpfMotor1, "lpf_motor1");
-  command.add('C', lpfMotor2, "lpf_motor2");
+  command.add('A', lpfYaw, "lpf_Yaw");
 
   command.add('V', lpfSpeed, "lpf speed");    // VF0.07
   command.add('T', lpfThrottle, "lpf throttle");
   command.add('I', lpfSteering, "lpf steering");
 
-  //command.add('O', angleOffs, "angleOffset");   //O...
-  //command.add('G', gyroFilter, "gyroFilterConstant");   //G...
 
   motor1.useMonitoring(Serial);
   motor1.monitor_downsample = 300; //
@@ -787,16 +779,11 @@ void setup() {
 //  ******************************************* LOOP ******************************************  
 void loop() {
   /*
-  - PID értékek mentése
-  - PID_balance.P = 0.2; kipróbálni preferenceshez.
-  - 
-  - offset érték automatikus kalibrálása;
-  - Motorok feszültségének emelése (6V / 0.6A kicsit gyenge.) *
+ 
   - egyenes vonal tartás finomhangolása
   - sztender beépítése, servo könyvtár, pwm időzítők kipróbálása
-  - enable kimenet a mrgfelelő lábra átkötni
-  - felborulás érzékelése*
   - joystik deadzone
+  - kormány, gázértékek beállítása
   
   */
   motor1.loopFOC();
@@ -838,35 +825,23 @@ void loop() {
     if(falling == false && startBalancing == true){
       if(ServoPos == ParkingPos) ServoPos = RunningPos;  // ha indult a robot, a kitámasztót behúzza
 
-      motor1_velocity = motor1.shaft_velocity;  //lpf_motor1(motor1.shaft_velocity); 
+      motor1_velocity = motor1.shaft_velocity;  //lpf_Yaw(motor1.shaft_velocity); 
       motor2_velocity = motor2.shaft_velocity;  //lpf_motor2(motor2.shaft_velocity);
       //cél dőlésszőg meghatározása, a keréksebbesség és akívánt sebesség alapján    tartomány:~ -80 / 80
 
       // A két motor átlagsebessége szűrve (rad/s)
-      float current_robot_speed = lpf_speed((motor1_velocity + motor2_velocity) / 2.0); //*-1 hogy az előjel megfelelő
+      setpoint_angle = lpf_speed(PID_speed((motor1_velocity + motor2_velocity) / 2.0 - lpf_throttle(throttle))); //*-1 hogy az előjel megfelelő
       
-      // Cél dőlésszög (A joystick throttle és a kerekek jelenlegi sebességének különbsége (rad)
-      setpoint_angle = PID_speed(current_robot_speed - lpf_throttle(throttle)); // A joystick throttle és a kerekek jelenlegi sebességének különbsége (rad)
 
       //balance out Amperben
       balanceOut = PID_balance(setpoint_angle - pitch);
 
-      //Amperben, mint a balance limit kb. 20-30%-a (pl. max 0.2 - 0.3 Amper),
-      float filteredSteering = lpf_steering(steering);
-
-      motor1Speed = balanceOut - filteredSteering; 
-      motor2Speed = balanceOut + filteredSteering; 
-
-      motor1.target = motor1Speed;// 
-      motor2.target = motor2Speed;// 
-
-      /*
       // 2. EGYENESVONAL TARTÁS (Yaw Compensation)
       float yaw_error = 0.0;
       if (steering == 0.0) {  
         // Ha a pilóta nem kormányoz, a két kerék sebességének meg kell egyeznie.
         // Ha a motor1 gyorsabb, a különbség pozitív -> a PID-nek csökkentenie kell a motor1 nyomatékát.
-        yaw_error = motor1_velocity - motor2_velocity;
+        yaw_error = lpf_Yaw(motor1_velocity - motor2_velocity);
       } else {
         // Ha szándékosan kanyarodunk, kikapcsoljuk az egyenesen tartást
         yaw_error = 0.0; 
@@ -883,6 +858,18 @@ void loop() {
       // 4. Végső motoráramok (SimpleFOC target)
       motor1.target = balanceOut - total_steering; 
       motor2.target = balanceOut + total_steering;
+
+      //Amperben, mint a balance limit kb. 20-30%-a (pl. max 0.2 - 0.3 Amper),
+      //float filteredSteering = lpf_steering(steering);
+
+      //motor1Speed = balanceOut - filteredSteering; 
+      //motor2Speed = balanceOut + filteredSteering; 
+
+      //motor1.target = motor1Speed;// 
+      //motor2.target = motor2Speed;// 
+
+      /*
+      
       */
     motor1.move();
     motor2.move();
@@ -908,6 +895,10 @@ void loop() {
   
   //Serial Monitor
   if (tNowMs-tLastMs > 300){
+    //PID_speed.P = 1.8;
+    //Serial.print(PID_speed.P);
+    //Serial.print(PID_speed.I);
+    //Serial.print(PID_speed.D);
     //Serial.print("  Loop FOC sebesség: "); Serial.print(loopHz); Serial.print(" Hz ");
     //Serial.print("  IMU frissítések: "); Serial.print(IMUHz); Serial.print(" Hz ");
     //Serial.print("Vel1: ");Serial.print(motor1.shaft_velocity);
