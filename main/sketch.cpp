@@ -28,7 +28,7 @@
 
 ControllerPtr myControllers[BP32_MAX_GAMEPADS];
 
-//Preferences preferences;
+Preferences preferences;
 // ************************************ PINOUT ************************************************
   
   #define SERVO1_PIN  21   //szervo
@@ -177,6 +177,9 @@ ControllerPtr myControllers[BP32_MAX_GAMEPADS];
   float setpoint_angle;
   float motor1_velocity;
   float motor2_velocity;
+
+  //float Balance_P = 1.5, Balance_I = 2.0, Balance_D = 0.15, Balance_R = 100000, Balance_L = 1.2;  // P I D Ramp, Limit 
+  //float Speed_P = 0.01, Speed_I = 0.01, Speed_D = 0.0, Speed_R = 100, Speed_L = 0.1;  
 
 //
 
@@ -343,7 +346,6 @@ void processControllers() {
   }
 }
 
-//  **************************** READ IMU *********************************************
 bool updatePitchIMU() {
   
   // --- IDŐZÍTETT BLOKK A BMI160 SZÁMÁRA ---
@@ -434,6 +436,71 @@ bool updatePitchIMU() {
     return true;
   } 
   return false;
+}
+
+void initIMU(){
+ // --- HARDVERES CS LÁB BEÁLLÍTÁSOK ---
+  // A CS lábat OUTPUT-ra tesszük és HIGH szintre emeljük (MISO leválasztás!)
+  pinMode(CS1, OUTPUT); digitalWrite(CS1, HIGH);
+
+  // Adjunk időt a szenzoroknak a belső Power-On-Reset-re (POR)
+  delay(50); 
+
+  // --- SPI BUSZ INDÍTÁSA ---
+  SPI.begin(SCK, MISO, MOSI);
+
+  // --- BMI160 SPI MÓDBA KÉNYSZERÍTÉSE ---
+  // Az adatlap szerint indítás után egy CSB felfutó él kell az SPI üzemmód aktiválásához
+  digitalWrite(CS1, LOW);   delayMicroseconds(10);
+  digitalWrite(CS1, HIGH);  delayMicroseconds(10);
+
+  // Végrehajtunk egy kézi tranzakciót és egy vak olvasást a BMI160-on SPI_MODE3-ban
+  SPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE3));
+  digitalWrite(CS1, LOW);
+  SPI.transfer(0x00 | 0x80); // CHIP_ID regiszter (0x00) + Olvasás maszk (0x80)
+  uint8_t chip_id = SPI.transfer(0x00);
+  digitalWrite(CS1, HIGH);
+  SPI.endTransaction();
+
+  Serial.print("BMI160 Chip ID keresese... ");
+  if(chip_id == 0xD1) {
+    Serial.println("SIKERES! (0xD1, SPI Mode 3 aktív)");
+  } else {
+    Serial.print("HIBA! Kapott ID: 0x"); Serial.println(chip_id, HEX);
+    Serial.println("Ellenorizd a bekotest vagy a tápfeszültséget!");
+  }
+  // --- BMI160 FELÉBRESZTÉSE (POWER MODES) ---
+  // Az adatlap szerint a 0x7E regiszterbe (CMD) küldött parancsokkal ébresztjük fel a chipeket
+  SPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE3));
+  
+  // 1. Gyorsulásmérő bekapcsolása normál módba (0x11 parancs a 0x7E regiszterbe)
+  digitalWrite(CS1, LOW);
+  SPI.transfer(0x7E & 0x7F); // Írás parancs (MSB = 0)
+  SPI.transfer(0x11);
+  digitalWrite(CS1, HIGH);
+  delay(5); // Biztosítsunk időt az indításra
+
+  // 2. Giroszkóp bekapcsolása normál módba (0x15 parancs a 0x7E regiszterbe)
+  digitalWrite(CS1, LOW);
+  SPI.transfer(0x7E & 0x7F);
+  SPI.transfer(0x15);
+  digitalWrite(CS1, HIGH);
+  delay(80); // A giroszkópnak kb. 80ms kell, hogy teljesen stabilizálódjon az első mérés előtt
+
+  SPI.endTransaction();
+  Serial.println("BMI160 felébresztve!");
+
+  // --- GYROSZKÓP ÁTCONFIGURÁLÁSA ±250°/s TARTOMÁNYRA ---
+  SPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE3));
+  
+  digitalWrite(CS1, LOW);
+  SPI.transfer(0x43 & 0x7F); // 0x43 regiszter címzése írásra (MSB = 0)
+  SPI.transfer(0x03);        // 0x03 érték = ±250°/s méréshatár
+  digitalWrite(CS1, HIGH);
+  delay(5);                  // Kis idő a regiszter mentésére
+
+  SPI.endTransaction();
+  Serial.println("BMI160 Gyro beallitva: +-250 deg/s");
 }
 
 void convertInValue(){
@@ -557,7 +624,7 @@ void processButtons(){
   
   // 1. SEBESSÉG PID: A kerekek sebességét finoman igazítja a kívánt gázhoz (throttle)
   // P=0.5 jó indulásnak, de az I tagot picit emelhetjük, a limit legyen magasabb!
-  PIDController PID_speed{0.01, 0.01, 0.0, 10000, 0.1};        // S
+  PIDController PID_speed{0.01, 0.01, 0.0, 100, 0.1};        // S
 
   // 2. EGYENSÚLYOZÓ PID (A robot magja): A dőlési szögből (pitch) számol keréksebességet.
   // Mivel a motor közvetlen hajtású, a P tagot fel kell vinni, a limitet pedig 15-20 rad/s-ra emelni!
@@ -592,9 +659,50 @@ void processButtons(){
   void lpfThrottle(char* cmd) {  command.lpf(&lpf_throttle, cmd);}
 
   void lpfYaw(char* cmd) {  command.lpf(&lpf_Yaw, cmd);}
-  
 
-//...
+//****************************************** Preferences ****************************************** 
+void readPIDval(){
+  PID_speed.P = preferences.getFloat("Speed_P", 0.01);
+  PID_speed.I = preferences.getFloat("Speed_I", 0.01);
+  PID_speed.D = preferences.getFloat("Speed_D", 0.0);
+  PID_speed.output_ramp = preferences.getFloat("Speed_R", 100);
+  PID_speed.limit = preferences.getFloat("Speed_L", 0.1);
+
+  PID_balance.P = preferences.getFloat("Balance_P", 1.5);
+  PID_balance.I = preferences.getFloat("Balance_I", 2.0);
+  PID_balance.D = preferences.getFloat("Balance_D", 0.15);
+  PID_balance.output_ramp = preferences.getFloat("Balance_R", 100000);
+  PID_balance.limit = preferences.getFloat("Balance_L", 1.2);
+
+  delay(100);
+  Serial.println("PID ertekek betoltve :");
+
+  Serial.print("BP: "); Serial.print(PID_balance.P);
+  Serial.print(" BI: "); Serial.print(PID_balance.I);
+  Serial.print(" BD: "); Serial.print(PID_balance.D);
+  Serial.print(" BR: "); Serial.print(PID_balance.output_ramp);
+  Serial.print(" BL: "); Serial.print(PID_balance.limit);
+  Serial.println();
+
+}
+
+void savePIDval(char* cmd){
+  preferences.putFloat("Speed_P", PID_speed.P);
+  preferences.putFloat("Speed_I", PID_speed.I);
+  preferences.putFloat("Speed_D", PID_speed.D);
+  preferences.putFloat("Speed_R", PID_speed.output_ramp);
+  preferences.putFloat("Speed_L", PID_speed.limit);
+
+  preferences.putFloat("Balance_P", PID_balance.P);
+  preferences.putFloat("Balance_I", PID_balance.I);
+  preferences.putFloat("Balance_D", PID_balance.D);
+  preferences.putFloat("Balance_R", PID_balance.output_ramp);
+  preferences.putFloat("Balance_L", PID_balance.limit);
+
+  Serial.println("PID ertekek sikeresen elmentve!");
+
+}
+
 //  ******************************************* SETUP *****************************************
 void setup() {
 
@@ -602,85 +710,22 @@ void setup() {
   delay(200);
 
   // initialise I2C hardware
-  //Wire.setClock(400000);
   Wire.begin(SDA, SCL); 
+
+  preferences.begin("PID_Values", false); // "my-app" a namespace, false = read/write
   
-//Init IMU
-  // --- HARDVERES CS LÁB BEÁLLÍTÁSOK ---
-  // Az összes CS lábat OUTPUT-ra tesszük és HIGH szintre emeljük (MISO leválasztás!)
-  //pinMode(CS2, OUTPUT); digitalWrite(CS2, HIGH);
-  //pinMode(CS3, OUTPUT); digitalWrite(CS3, HIGH);
-  pinMode(CS1, OUTPUT); digitalWrite(CS1, HIGH);
-
-  // Adjunk időt a szenzoroknak a belső Power-On-Reset-re (POR)
-  delay(50); 
-
-  // --- SPI BUSZ INDÍTÁSA ---
-  SPI.begin(SCK, MISO, MOSI);
-
-  // --- BMI160 SPI MÓDBA KÉNYSZERÍTÉSE ---
-  // Az adatlap szerint indítás után egy CSB felfutó él kell az SPI üzemmód aktiválásához
-  digitalWrite(CS1, LOW);   delayMicroseconds(10);
-  digitalWrite(CS1, HIGH);  delayMicroseconds(10);
-
-  // Végrehajtunk egy kézi tranzakciót és egy vak olvasást a BMI160-on SPI_MODE3-ban
-  SPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE3));
-  digitalWrite(CS1, LOW);
-  SPI.transfer(0x00 | 0x80); // CHIP_ID regiszter (0x00) + Olvasás maszk (0x80)
-  uint8_t chip_id = SPI.transfer(0x00);
-  digitalWrite(CS1, HIGH);
-  SPI.endTransaction();
-
-  Serial.print("BMI160 Chip ID keresese... ");
-  if(chip_id == 0xD1) {
-    Serial.println("SIKERES! (0xD1, SPI Mode 3 aktív)");
-  } else {
-    Serial.print("HIBA! Kapott ID: 0x"); Serial.println(chip_id, HEX);
-    Serial.println("Ellenorizd a bekotest vagy a tápfeszültséget!");
-  }
-  // --- BMI160 FELÉBRESZTÉSE (POWER MODES) ---
-  // Az adatlap szerint a 0x7E regiszterbe (CMD) küldött parancsokkal ébresztjük fel a chipeket
-  SPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE3));
-  
-  // 1. Gyorsulásmérő bekapcsolása normál módba (0x11 parancs a 0x7E regiszterbe)
-  digitalWrite(CS1, LOW);
-  SPI.transfer(0x7E & 0x7F); // Írás parancs (MSB = 0)
-  SPI.transfer(0x11);
-  digitalWrite(CS1, HIGH);
-  delay(5); // Biztosítsunk időt az indításra
-
-  // 2. Giroszkóp bekapcsolása normál módba (0x15 parancs a 0x7E regiszterbe)
-  digitalWrite(CS1, LOW);
-  SPI.transfer(0x7E & 0x7F);
-  SPI.transfer(0x15);
-  digitalWrite(CS1, HIGH);
-  delay(80); // A giroszkópnak kb. 80ms kell, hogy teljesen stabilizálódjon az első mérés előtt
-
-  SPI.endTransaction();
-  Serial.println("BMI160 felébresztve!");
-
-  // --- GYROSZKÓP ÁTCONFIGURÁLÁSA ±250°/s TARTOMÁNYRA ---
-  SPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE3));
-  
-  digitalWrite(CS1, LOW);
-  SPI.transfer(0x43 & 0x7F); // 0x43 regiszter címzése írásra (MSB = 0)
-  SPI.transfer(0x03);        // 0x03 érték = ±250°/s méréshatár
-  digitalWrite(CS1, HIGH);
-  delay(5);                  // Kis idő a regiszter mentésére
-
-  SPI.endTransaction();
-  Serial.println("BMI160 Gyro beallitva: +-250 deg/s");
+  initIMU();
+ 
+  readPIDval();  // Betöltjük a PID értékeket a preferences-ből
 
 // SERVO------------------------------------------------------------------------------------------------------------------------------
-  // Allow allocation of all timers
   ESP32PWM::allocateTimer(3);
   servo.setPeriodHertz(50);    // standard 50 hz servo
   servo.attach(SERVO1_PIN, MinServoValue, MaxServoValue); //
   
   servo.writeMicroseconds(ServoPos);
-  delay(500);
+  delay(100);
 
-//
 // Controller
   const uint8_t* addr = BP32.localBdAddress();
   Serial.printf("BD Addr: %2X:%2X:%2X:%2X:%2X:%2X\n", addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
@@ -754,6 +799,8 @@ void setup() {
 // COMMANDER
   // define the motor id
   //command.add('M', onMotor, "motor");
+  command.add('M', savePIDval, "Save PID to flash");
+
   command.add('B', pidBal, "PID_balance");    // BP0.5, BI0.001, ...
   command.add('S', pidSpd, "PID_speed");
 
